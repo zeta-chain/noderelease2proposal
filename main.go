@@ -150,6 +150,7 @@ func release2Proposal(rawReleaseUrl string) (*Proposal, error) {
 					Info:   string(ucBytes),
 					Name:   tag,
 				},
+				Authority: authority,
 			},
 		},
 		Metadata: rawReleaseUrl,
