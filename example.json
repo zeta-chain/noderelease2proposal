@@ -1,0 +1,19 @@
+{
+  "messages": [
+    {
+      "@type": "/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade",
+      "plan": {
+        "height": "1",
+        "info": "{\"binaries\":{\"darwin/amd64\":\"https://github.com/zeta-chain/node/releases/download/v14.0.1/zetacored-darwin-amd64?checksum=sha256:e4342184cde1245f5e87fa35a7053133c10842f28e4a98fb01724869c424f84c\",\"darwin/arm64\":\"https://github.com/zeta-chain/node/releases/download/v14.0.1/zetacored-darwin-arm64?checksum=sha256:fd0f5982f17fbfed88eb81e0b3eddf2c4aa87e71ebf94434a739e2be0a87ae39\",\"linux/amd64\":\"https://github.com/zeta-chain/node/releases/download/v14.0.1/zetacored-linux-amd64?checksum=sha256:9b0e9b7400bece71c56aa7685a0b2ac73626170b1323156d53a8bfc67f42fb7b\",\"linux/arm64\":\"https://github.com/zeta-chain/node/releases/download/v14.0.1/zetacored-linux-arm64?checksum=sha256:1e4e105b8a1e23e7e98f9784c91349caf4aa8dc89eed0625523dfc3412d3142e\",\"zetaclientd-linux/amd64\":\"https://github.com/zeta-chain/node/releases/download/v14.0.1/zetaclientd-linux-amd64?checksum=sha256:a8be49964e89b2252fef597d5797e701ea2f1abce0feef7ae222d953cff99eff\",\"zetaclientd-linux/arm64\":\"https://github.com/zeta-chain/node/releases/download/v14.0.1/zetaclientd-linux-arm64?checksum=sha256:22121dcde8ef559e8b9c3424905c2225d762f85d9020fc27342b4bb61569b403\"}}",
+        "name": "v14.0.1",
+        "time": "0001-01-01T00:00:00Z",
+        "upgraded_client_state": null
+      },
+      "authority": ""
+    }
+  ],
+  "metadata": "https://github.com/zeta-chain/node/releases/tag/v14.0.1",
+  "deposit": "100000000azeta",
+  "title": "v14.0.1 Upgrade",
+  "summary": "v14.0.1 Upgrade"
+}
