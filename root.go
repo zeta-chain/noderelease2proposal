@@ -50,9 +50,9 @@ var rootCmd = &cobra.Command{
 			return err
 		}
 		if upgradeHeight == 0 {
-			log.Print("upgrade height is for example only and need to be configured correctly")
+			log.Print("WARN: upgrade height is for example only and need to be configured correctly")
 		}
-		log.Print("deposit is for example only and need to be configured correctly")
+		log.Print("WARN: deposit is for example only and need to be configured correctly")
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		enc.Encode(proposal)
