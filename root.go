@@ -25,6 +25,8 @@ import (
 	"github.com/theupdateframework/go-tuf/v2/metadata/fetcher"
 
 	cometbft_http_client "github.com/cometbft/cometbft/rpc/client/http"
+
+	gh "github.com/cli/cli/v2/pkg/cmd/attestation/verification"
 )
 
 func init() {
@@ -139,8 +141,18 @@ type Messages struct {
 	Authority string `json:"authority"`
 }
 
-func downloadChecksums(url string) (map[string]string, error) {
-	resp, err := http.Get(url)
+func downloadChecksums(url string, token string) (map[string]string, error) {
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -170,9 +182,13 @@ func downloadChecksums(url string) (map[string]string, error) {
 
 const githubIssuer = "https://token.actions.githubusercontent.com"
 
-func getTrustedRoot() (*root.TrustedRoot, error) {
-	opts := tuf.DefaultOptions()
+func getTrustedRoots() (root.TrustedMaterial, error) {
+	var trustedRoots root.TrustedMaterialCollection
+
 	fetcher := fetcher.DefaultFetcher{}
+
+	// load the default trusted root
+	opts := tuf.DefaultOptions()
 	opts.Fetcher = &fetcher
 
 	client, err := tuf.New(opts)
@@ -188,7 +204,23 @@ func getTrustedRoot() (*root.TrustedRoot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return trustedRoot, nil
+	trustedRoots = append(trustedRoots, trustedRoot)
+
+	// also load the github trusted root
+	// this is needed to validate attestations from private repositories
+	opts = gh.GitHubTUFOptions()
+	opts.Fetcher = &fetcher
+	client, err = tuf.New(opts)
+	if err != nil {
+		return nil, err
+	}
+	trustedRoot, err = root.GetTrustedRoot(client)
+	if err != nil {
+		return nil, err
+	}
+	trustedRoots = append(trustedRoots, trustedRoot)
+
+	return trustedRoots, nil
 }
 
 type validateAttestationParams struct {
@@ -228,7 +260,15 @@ func validateAttestation(p validateAttestationParams) error {
 		return fmt.Errorf("unable to find attestation asset")
 	}
 
-	resp, err := http.Get(*attestationAsset.BrowserDownloadURL)
+	attestationURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/assets/%d", p.Owner, p.Repo, attestationAsset.GetID())
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", attestationURL, nil)
+	req.Header.Set("Accept", "application/octet-stream")
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("GITHUB_TOKEN"))
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("download attestation: %w", err)
 	}
@@ -259,14 +299,14 @@ func validateAttestation(p validateAttestationParams) error {
 	}
 
 	verifierConfig := []verify.VerifierOption{
-		verify.WithTransparencyLog(1),
+		// verify.WithTransparencyLog(1),
 		verify.WithObserverTimestamps(1),
 	}
 	identityPolicies := []verify.PolicyOption{
 		verify.WithCertificateIdentity(certID),
 	}
 
-	trustedMaterial, err := getTrustedRoot()
+	trustedMaterial, err := getTrustedRoots()
 	if err != nil {
 		return fmt.Errorf("get trusted roots: %w", err)
 	}
@@ -314,7 +354,8 @@ func validateAttestation(p validateAttestationParams) error {
 func release2Proposal(rawReleaseUrl string, upgradeHeight int64, skipAttestation bool, attestOrgOnly bool) (*Proposal, error) {
 	client := github.NewClient(nil)
 	// in case of private release
-	if token, ok := os.LookupEnv("GITHUB_TOKEN"); ok {
+	token, ok := os.LookupEnv("GITHUB_TOKEN")
+	if ok {
 		client = client.WithAuthToken(token)
 	}
 
@@ -344,7 +385,8 @@ func release2Proposal(rawReleaseUrl string, upgradeHeight int64, skipAttestation
 		return nil, fmt.Errorf("unable to find checksusms asset")
 	}
 
-	checksums, err := downloadChecksums(*checksumsAsset.BrowserDownloadURL)
+	checksumsURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/assets/%d", owner, repo, checksumsAsset.GetID())
+	checksums, err := downloadChecksums(checksumsURL, token)
 	if err != nil {
 		return nil, fmt.Errorf("download checksums %s: %w", *checksumsAsset.BrowserDownloadURL, err)
 	}
