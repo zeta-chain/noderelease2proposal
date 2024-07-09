@@ -31,6 +31,7 @@ func init() {
 	rootCmd.Flags().String("rpc-url", "", "tendermint/cometbft rpc url to estimate block height")
 	rootCmd.Flags().String("upgrade-time", "", "RFC3339 timestamp (with timezone) for the block height estimator")
 	rootCmd.Flags().Bool("skip-attestation", false, "skip attestation verification")
+	rootCmd.Flags().Bool("attest-org-only", false, "skip exact repo attestation verification")
 }
 
 var rootCmd = &cobra.Command{
@@ -54,7 +55,8 @@ var rootCmd = &cobra.Command{
 			}
 		}
 		skipAttestation, _ := cmd.Flags().GetBool("skip-attestation")
-		proposal, err := release2Proposal(args[0], upgradeHeight, skipAttestation)
+		attestOrgOnly, _ := cmd.Flags().GetBool("attest-org-only")
+		proposal, err := release2Proposal(args[0], upgradeHeight, skipAttestation, attestOrgOnly)
 		if err != nil {
 			return err
 		}
@@ -190,10 +192,11 @@ func getTrustedRoot() (*root.TrustedRoot, error) {
 }
 
 type validateAttestationParams struct {
-	Owner     string
-	Repo      string
-	Release   *github.RepositoryRelease
-	Checksums map[string]string
+	Owner         string
+	Repo          string
+	Release       *github.RepositoryRelease
+	Checksums     map[string]string
+	AttestOrgOnly bool
 }
 
 // validateAttestation validates the attestation produced by https://github.com/actions/attest
@@ -244,8 +247,12 @@ func validateAttestation(p validateAttestationParams) error {
 		attestationBundles = append(attestationBundles, pbBundle)
 	}
 
+	repoExpr := p.Repo
+	if p.AttestOrgOnly {
+		repoExpr = ".+"
+	}
 	// validate that the attestation is for the correct repository but don't check an exact workflow name
-	sanRegex := fmt.Sprintf("^https://github.com/%s/%s/.github/workflows/.*", p.Owner, p.Repo)
+	sanRegex := fmt.Sprintf("^https://github.com/%s/%s/.github/workflows/.*", p.Owner, repoExpr)
 	certID, err := verify.NewShortCertificateIdentity(githubIssuer, "", "", sanRegex)
 	if err != nil {
 		return err
@@ -269,6 +276,10 @@ func validateAttestation(p validateAttestationParams) error {
 		return err
 	}
 
+	repoMismatch := false
+	expectedSourceRepositoryURI := fmt.Sprintf("https://github.com/%s/%s", p.Owner, p.Repo)
+	gotSourceRepositoryURI := ""
+
 	// for each artifact, verify that there is at least one matching attestation
 	for i, artifact := range artifacts {
 		ok := false
@@ -281,6 +292,10 @@ func validateAttestation(p validateAttestationParams) error {
 			if sigCertCommit != releaseCommit {
 				return fmt.Errorf("attestation for checksum %s is for commit %s, not %s", flatChecksums[i], sigCertCommit, releaseCommit)
 			}
+			if res.Signature.Certificate.SourceRepositoryURI != expectedSourceRepositoryURI {
+				gotSourceRepositoryURI = res.Signature.Certificate.SourceRepositoryURI
+				repoMismatch = true
+			}
 			ok = true
 			break
 		}
@@ -289,10 +304,14 @@ func validateAttestation(p validateAttestationParams) error {
 		}
 	}
 
+	if repoMismatch {
+		log.Printf("WARN: attestation is for a different repository: %s", gotSourceRepositoryURI)
+	}
+
 	return nil
 }
 
-func release2Proposal(rawReleaseUrl string, upgradeHeight int64, skipAttestation bool) (*Proposal, error) {
+func release2Proposal(rawReleaseUrl string, upgradeHeight int64, skipAttestation bool, attestOrgOnly bool) (*Proposal, error) {
 	client := github.NewClient(nil)
 	// in case of private release
 	if token, ok := os.LookupEnv("GITHUB_TOKEN"); ok {
@@ -331,10 +350,11 @@ func release2Proposal(rawReleaseUrl string, upgradeHeight int64, skipAttestation
 	}
 
 	err = validateAttestation(validateAttestationParams{
-		Owner:     owner,
-		Repo:      repo,
-		Release:   release,
-		Checksums: checksums,
+		Owner:         owner,
+		Repo:          repo,
+		Release:       release,
+		Checksums:     checksums,
+		AttestOrgOnly: attestOrgOnly,
 	})
 	if err != nil {
 		if skipAttestation {
