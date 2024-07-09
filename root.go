@@ -190,10 +190,10 @@ func getTrustedRoot() (*root.TrustedRoot, error) {
 }
 
 type validateAttestationParams struct {
-	Owner         string
-	Repo          string
-	ReleaseAssets []*github.ReleaseAsset
-	Checksums     map[string]string
+	Owner     string
+	Repo      string
+	Release   *github.RepositoryRelease
+	Checksums map[string]string
 }
 
 // validateAttestation validates the attestation produced by https://github.com/actions/attest
@@ -203,6 +203,8 @@ func validateAttestation(p validateAttestationParams) error {
 	if len(p.Checksums) == 0 {
 		return fmt.Errorf("no checksums?")
 	}
+
+	releaseCommit := *p.Release.TargetCommitish
 
 	var flatChecksums []string
 	var artifacts []verify.ArtifactPolicyOption
@@ -216,7 +218,7 @@ func validateAttestation(p validateAttestationParams) error {
 		artifacts = append(artifacts, artifactPolicy)
 	}
 
-	attestationAsset, ok := lo.Find(p.ReleaseAssets, func(a *github.ReleaseAsset) bool {
+	attestationAsset, ok := lo.Find(p.Release.Assets, func(a *github.ReleaseAsset) bool {
 		return *a.Name == "attestation.jsonl"
 	})
 	if !ok {
@@ -238,6 +240,7 @@ func validateAttestation(p validateAttestationParams) error {
 		if err != nil {
 			return fmt.Errorf("unmarshal attestation: %w", err)
 		}
+
 		attestationBundles = append(attestationBundles, pbBundle)
 	}
 
@@ -270,9 +273,13 @@ func validateAttestation(p validateAttestationParams) error {
 	for i, artifact := range artifacts {
 		ok := false
 		for _, pbBundle := range attestationBundles {
-			_, err := sev.Verify(&pbBundle, verify.NewPolicy(artifact, identityPolicies...))
+			res, err := sev.Verify(&pbBundle, verify.NewPolicy(artifact, identityPolicies...))
 			if err != nil {
 				continue
+			}
+			sigCertCommit := res.Signature.Certificate.SourceRepositoryDigest
+			if sigCertCommit != releaseCommit {
+				return fmt.Errorf("attestation for checksum %s is for commit %s, not %s", flatChecksums[i], sigCertCommit, releaseCommit)
 			}
 			ok = true
 			break
@@ -324,10 +331,10 @@ func release2Proposal(rawReleaseUrl string, upgradeHeight int64, skipAttestation
 	}
 
 	err = validateAttestation(validateAttestationParams{
-		Owner:         owner,
-		Repo:          repo,
-		ReleaseAssets: release.Assets,
-		Checksums:     checksums,
+		Owner:     owner,
+		Repo:      repo,
+		Release:   release,
+		Checksums: checksums,
 	})
 	if err != nil {
 		if skipAttestation {
