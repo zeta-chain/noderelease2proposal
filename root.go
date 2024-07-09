@@ -25,6 +25,8 @@ import (
 	"github.com/theupdateframework/go-tuf/v2/metadata/fetcher"
 
 	cometbft_http_client "github.com/cometbft/cometbft/rpc/client/http"
+
+	gh "github.com/cli/cli/v2/pkg/cmd/attestation/verification"
 )
 
 func init() {
@@ -170,9 +172,13 @@ func downloadChecksums(url string) (map[string]string, error) {
 
 const githubIssuer = "https://token.actions.githubusercontent.com"
 
-func getTrustedRoot() (*root.TrustedRoot, error) {
-	opts := tuf.DefaultOptions()
+func getTrustedRoots() (root.TrustedMaterial, error) {
+	var trustedRoots root.TrustedMaterialCollection
+
 	fetcher := fetcher.DefaultFetcher{}
+
+	// load the default trusted root
+	opts := tuf.DefaultOptions()
 	opts.Fetcher = &fetcher
 
 	client, err := tuf.New(opts)
@@ -188,7 +194,23 @@ func getTrustedRoot() (*root.TrustedRoot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return trustedRoot, nil
+	trustedRoots = append(trustedRoots, trustedRoot)
+
+	// also load the github trusted root
+	// this is needed to validate attestations from private repositories
+	opts = gh.GitHubTUFOptions()
+	opts.Fetcher = &fetcher
+	client, err = tuf.New(opts)
+	if err != nil {
+		return nil, err
+	}
+	trustedRoot, err = root.GetTrustedRoot(client)
+	if err != nil {
+		return nil, err
+	}
+	trustedRoots = append(trustedRoots, trustedRoot)
+
+	return trustedRoots, nil
 }
 
 type validateAttestationParams struct {
@@ -266,7 +288,7 @@ func validateAttestation(p validateAttestationParams) error {
 		verify.WithCertificateIdentity(certID),
 	}
 
-	trustedMaterial, err := getTrustedRoot()
+	trustedMaterial, err := getTrustedRoots()
 	if err != nil {
 		return fmt.Errorf("get trusted roots: %w", err)
 	}
