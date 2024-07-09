@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,7 +17,12 @@ import (
 
 	"github.com/google/go-github/v61/github"
 	"github.com/samber/lo"
+	"github.com/sigstore/sigstore-go/pkg/bundle"
+	"github.com/sigstore/sigstore-go/pkg/root"
+	"github.com/sigstore/sigstore-go/pkg/tuf"
+	"github.com/sigstore/sigstore-go/pkg/verify"
 	"github.com/spf13/cobra"
+	"github.com/theupdateframework/go-tuf/v2/metadata/fetcher"
 
 	cometbft_http_client "github.com/cometbft/cometbft/rpc/client/http"
 )
@@ -23,6 +30,7 @@ import (
 func init() {
 	rootCmd.Flags().String("rpc-url", "", "tendermint/cometbft rpc url to estimate block height")
 	rootCmd.Flags().String("upgrade-time", "", "RFC3339 timestamp (with timezone) for the block height estimator")
+	rootCmd.Flags().Bool("skip-attestation", false, "skip attestation verification")
 }
 
 var rootCmd = &cobra.Command{
@@ -45,7 +53,8 @@ var rootCmd = &cobra.Command{
 				return fmt.Errorf("estimating upgrade height: %w", err)
 			}
 		}
-		proposal, err := release2Proposal(args[0], upgradeHeight)
+		skipAttestation, _ := cmd.Flags().GetBool("skip-attestation")
+		proposal, err := release2Proposal(args[0], upgradeHeight, skipAttestation)
 		if err != nil {
 			return err
 		}
@@ -157,7 +166,126 @@ func downloadChecksums(url string) (map[string]string, error) {
 	return checksums, nil
 }
 
-func release2Proposal(rawReleaseUrl string, upgradeHeight int64) (*Proposal, error) {
+const githubIssuer = "https://token.actions.githubusercontent.com"
+
+func getTrustedRoot() (*root.TrustedRoot, error) {
+	opts := tuf.DefaultOptions()
+	fetcher := fetcher.DefaultFetcher{}
+	opts.Fetcher = &fetcher
+
+	client, err := tuf.New(opts)
+	if err != nil {
+		return nil, err
+	}
+	trustedRootJSON, err := client.GetTarget("trusted_root.json")
+	if err != nil {
+		return nil, err
+	}
+	var trustedRoot *root.TrustedRoot
+	trustedRoot, err = root.NewTrustedRootFromJSON(trustedRootJSON)
+	if err != nil {
+		return nil, err
+	}
+	return trustedRoot, nil
+}
+
+type validateAttestationParams struct {
+	Owner         string
+	Repo          string
+	ReleaseAssets []*github.ReleaseAsset
+	Checksums     map[string]string
+}
+
+// validateAttestation validates the attestation produced by https://github.com/actions/attest
+// mostly based on https://github.com/sigstore/sigstore-go/blob/main/cmd/sigstore-go/main.go
+// but also some from the github cli https://github.com/cli/cli/blob/0df5596512ad44dec74ab3dc07a4e6ea3a7c78fc/pkg/cmd/attestation/verification/sigstore.go#L217
+func validateAttestation(p validateAttestationParams) error {
+	if len(p.Checksums) == 0 {
+		return fmt.Errorf("no checksums?")
+	}
+
+	var flatChecksums []string
+	var artifacts []verify.ArtifactPolicyOption
+	for _, checksum := range p.Checksums {
+		artifactDigestBytes, err := hex.DecodeString(checksum)
+		if err != nil {
+			return err
+		}
+		artifactPolicy := verify.WithArtifactDigest("sha256", artifactDigestBytes)
+		flatChecksums = append(flatChecksums, checksum)
+		artifacts = append(artifacts, artifactPolicy)
+	}
+
+	attestationAsset, ok := lo.Find(p.ReleaseAssets, func(a *github.ReleaseAsset) bool {
+		return *a.Name == "attestation.jsonl"
+	})
+	if !ok {
+		return fmt.Errorf("unable to find attestation asset")
+	}
+
+	resp, err := http.Get(*attestationAsset.BrowserDownloadURL)
+	if err != nil {
+		return fmt.Errorf("download attestation: %w", err)
+	}
+	defer resp.Body.Close()
+	scanner := bufio.NewScanner(resp.Body)
+
+	var attestationBundles []bundle.ProtobufBundle
+
+	for scanner.Scan() {
+		pbBundle := bundle.ProtobufBundle{}
+		err = pbBundle.UnmarshalJSON(scanner.Bytes())
+		if err != nil {
+			return fmt.Errorf("unmarshal attestation: %w", err)
+		}
+		attestationBundles = append(attestationBundles, pbBundle)
+	}
+
+	// validate that the attestation is for the correct repository but don't check an exact workflow name
+	sanRegex := fmt.Sprintf("^https://github.com/%s/%s/.github/workflows/.*", p.Owner, p.Repo)
+	certID, err := verify.NewShortCertificateIdentity(githubIssuer, "", "", sanRegex)
+	if err != nil {
+		return err
+	}
+
+	verifierConfig := []verify.VerifierOption{
+		verify.WithTransparencyLog(1),
+		verify.WithObserverTimestamps(1),
+	}
+	identityPolicies := []verify.PolicyOption{
+		verify.WithCertificateIdentity(certID),
+	}
+
+	trustedMaterial, err := getTrustedRoot()
+	if err != nil {
+		return fmt.Errorf("get trusted roots: %w", err)
+	}
+
+	sev, err := verify.NewSignedEntityVerifier(trustedMaterial, verifierConfig...)
+	if err != nil {
+		return err
+	}
+
+	// for each artifact, verify that there is at least one matching attestation
+	for i, artifact := range artifacts {
+		ok := false
+		for _, pbBundle := range attestationBundles {
+			_, err := sev.Verify(&pbBundle, verify.NewPolicy(artifact, identityPolicies...))
+			if err != nil {
+				continue
+			}
+			ok = true
+			break
+		}
+		if !ok {
+			return fmt.Errorf("no attestation for checksum %s", flatChecksums[i])
+		}
+	}
+
+	return nil
+}
+
+func release2Proposal(rawReleaseUrl string, upgradeHeight int64, skipAttestation bool) (*Proposal, error) {
 	client := github.NewClient(nil)
 	// in case of private release
 	if token, ok := os.LookupEnv("GITHUB_TOKEN"); ok {
@@ -193,6 +321,20 @@ func release2Proposal(rawReleaseUrl string, upgradeHeight int64) (*Proposal, err
 	checksums, err := downloadChecksums(*checksumsAsset.BrowserDownloadURL)
 	if err != nil {
 		return nil, fmt.Errorf("download checksums %s: %w", *checksumsAsset.BrowserDownloadURL, err)
+	}
+
+	err = validateAttestation(validateAttestationParams{
+		Owner:         owner,
+		Repo:          repo,
+		ReleaseAssets: release.Assets,
+		Checksums:     checksums,
+	})
+	if err != nil {
+		if skipAttestation {
+			log.Printf("WARN: attestation verification failed: %v", err)
+		} else {
+			return nil, fmt.Errorf("validate attestation: %w", err)
+		}
 	}
 
 	uc := &upgradeConfig{
