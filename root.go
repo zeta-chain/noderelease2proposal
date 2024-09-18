@@ -195,6 +195,7 @@ type validateAttestationParams struct {
 	Owner         string
 	Repo          string
 	Release       *github.RepositoryRelease
+	Ref           *github.Reference
 	Checksums     map[string]string
 	AttestOrgOnly bool
 }
@@ -207,7 +208,7 @@ func validateAttestation(p validateAttestationParams) error {
 		return fmt.Errorf("no checksums?")
 	}
 
-	releaseCommit := *p.Release.TargetCommitish
+	releaseCommit := p.Ref.Object.GetSHA()
 
 	var flatChecksums []string
 	var artifacts []verify.ArtifactPolicyOption
@@ -255,7 +256,7 @@ func validateAttestation(p validateAttestationParams) error {
 	sanRegex := fmt.Sprintf("^https://github.com/%s/%s/.github/workflows/.*", p.Owner, repoExpr)
 	certID, err := verify.NewShortCertificateIdentity(githubIssuer, "", "", sanRegex)
 	if err != nil {
-		return err
+		return fmt.Errorf("certificate identity: %w", err)
 	}
 
 	verifierConfig := []verify.VerifierOption{
@@ -273,7 +274,7 @@ func validateAttestation(p validateAttestationParams) error {
 
 	sev, err := verify.NewSignedEntityVerifier(trustedMaterial, verifierConfig...)
 	if err != nil {
-		return err
+		return fmt.Errorf("new signed entity verifier: %w", err)
 	}
 
 	repoMismatch := false
@@ -336,6 +337,11 @@ func release2Proposal(rawReleaseUrl string, upgradeHeight int64, skipAttestation
 		return nil, fmt.Errorf("get release %s: %w", tag, err)
 	}
 
+	releaseRef, _, err := client.Git.GetRef(ctx, owner, repo, fmt.Sprintf("tags/%s", tag))
+	if err != nil {
+		return nil, fmt.Errorf("get ref %s: %w", tag, err)
+	}
+
 	checksumsAsset, ok := lo.Find(release.Assets, func(a *github.ReleaseAsset) bool {
 		return *a.Name == "checksums.txt"
 	})
@@ -353,6 +359,7 @@ func release2Proposal(rawReleaseUrl string, upgradeHeight int64, skipAttestation
 		Owner:         owner,
 		Repo:          repo,
 		Release:       release,
+		Ref:           releaseRef,
 		Checksums:     checksums,
 		AttestOrgOnly: attestOrgOnly,
 	})
