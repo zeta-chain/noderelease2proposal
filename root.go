@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -23,11 +25,19 @@ import (
 	"github.com/sigstore/sigstore-go/pkg/verify"
 	"github.com/spf13/cobra"
 	"github.com/theupdateframework/go-tuf/v2/metadata/fetcher"
+	"gopkg.in/yaml.v3"
 
 	cometbft_http_client "github.com/cometbft/cometbft/rpc/client/http"
 )
 
+const (
+	outputFormatJson        = "json"
+	outputFormatJsonInfo    = "json-info"
+	outputFormatAnsibleYaml = "ansible-yaml"
+)
+
 func init() {
+	rootCmd.Flags().StringP("output", "o", outputFormatJson, "output format (json|json-info|ansible-yaml)")
 	rootCmd.Flags().String("rpc-url", "", "tendermint/cometbft rpc url to estimate block height")
 	rootCmd.Flags().String("upgrade-time", "", "RFC3339 timestamp (with timezone) for the block height estimator")
 	rootCmd.Flags().Bool("skip-attestation", false, "skip attestation verification")
@@ -41,6 +51,13 @@ var rootCmd = &cobra.Command{
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		rpcUrl, _ := cmd.Flags().GetString("rpc-url")
+
+		outputFormat, _ := cmd.Flags().GetString("output")
+		switch outputFormat {
+		case outputFormatJson, outputFormatJsonInfo, outputFormatAnsibleYaml:
+		default:
+			return fmt.Errorf("%s is not a valid output format", outputFormat)
+		}
 
 		upgradeHeight := int64(0)
 		if rpcUrl != "" {
@@ -64,9 +81,55 @@ var rootCmd = &cobra.Command{
 			log.Print("WARN: upgrade height is for example only and need to be configured correctly")
 		}
 		log.Print("WARN: deposit is for example only and need to be configured correctly")
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.Encode(proposal)
+
+		upgradeConfig := upgradeConfig{}
+		_ = json.Unmarshal([]byte(proposal.Messages[0].Plan.Info), &upgradeConfig)
+
+		switch outputFormat {
+		case outputFormatJson:
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			enc.Encode(proposal)
+		case outputFormatJsonInfo:
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			enc.Encode(upgradeConfig)
+		case outputFormatAnsibleYaml:
+			allInfo := []ansibleBinaryInfo{}
+			for platform, rawUrl := range upgradeConfig.Binaries {
+				platformParts := strings.Split(platform, "/")
+				os, arch := platformParts[0], platformParts[1]
+				if !strings.Contains(os, "linux") {
+					continue
+				}
+				pUrl, err := url.Parse(rawUrl)
+				if err != nil {
+					return fmt.Errorf("parsing %s: %w", rawUrl, err)
+				}
+				queryLessUrl := &url.URL{
+					Scheme: pUrl.Scheme,
+					Host:   pUrl.Host,
+					Path:   pUrl.Path,
+				}
+				name, version := extractNameAndVersion(queryLessUrl.String())
+
+				info := ansibleBinaryInfo{
+					Name:         name,
+					Version:      version,
+					Checksum:     pUrl.Query().Get("checksum"),
+					Architecture: arch,
+					URL:          queryLessUrl.String(),
+					Mode:         "0755",
+					Owner:        "zetachain",
+					Group:        "zetachain",
+					Dest:         "{{ ensure_cosmovisor_visor_path }}/upgrades/v22/bin/{{ ensure_cosmovisor_daemon_name }}",
+				}
+				allInfo = append(allInfo, info)
+			}
+			enc := yaml.NewEncoder(os.Stdout)
+			enc.SetIndent(2)
+			enc.Encode(allInfo)
+		}
 		return nil
 	},
 }
@@ -75,6 +138,16 @@ func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func extractNameAndVersion(githubDownloadUrl string) (string, string) {
+	// Extract the file name from the URL
+	fileName := path.Base(githubDownloadUrl)
+
+	versionRegex := regexp.MustCompile(`(v\d+\.\d+\.\d+)`)
+	version := versionRegex.FindString(githubDownloadUrl)
+
+	return fileName, version
 }
 
 func estimateUpgradeHeight(rpcUrl string, targetTime time.Time) (int64, error) {
@@ -114,6 +187,19 @@ func estimateUpgradeHeight(rpcUrl string, targetTime time.Time) (int64, error) {
 
 const authority = "zeta10d07y265gmmuvt4z0w9aw880jnsr700jvxasvr"
 const softwareUpgradeType = "/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade"
+
+type ansibleBinaryInfo struct {
+	Name           string `yaml:"name"`
+	Version        string `yaml:"version"`
+	Checksum       string `yaml:"checksum"`
+	Architecture   string `yaml:"architecture"`
+	URL            string `yaml:"url"`
+	Dest           string `yaml:"dest"`
+	Mode           string `yaml:"mode"`
+	Owner          string `yaml:"owner"`
+	Group          string `yaml:"group"`
+	ExcludeNetwork string `yaml:"exclude_network"`
+}
 
 type upgradeConfig struct {
 	Binaries map[string]string `json:"binaries"`
