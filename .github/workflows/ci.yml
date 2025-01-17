@@ -1,0 +1,15 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+      - name: verify v25 release
+        run: go run . --rpc-url ${{ secrets.TESTNET_RPC_URL }} --upgrade-time $(date -u -d "+7 days" "+%Y-%m-%dT%H:%M:%SZ") https://github.com/zeta-chain/node/releases/tag/v25.0.0
+
