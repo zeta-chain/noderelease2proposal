@@ -11,13 +11,16 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/go-github/v61/github"
+	"github.com/hashicorp/go-getter"
 	"github.com/samber/lo"
 	"github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore-go/pkg/root"
@@ -34,6 +37,8 @@ const (
 	outputFormatJson        = "json"
 	outputFormatJsonInfo    = "json-info"
 	outputFormatAnsibleYaml = "ansible-yaml"
+
+	tmpZetacoredPath = "/tmp/zetacored.noderelease2proposal"
 )
 
 func init() {
@@ -167,7 +172,7 @@ func estimateUpgradeHeight(rpcUrl string, targetTime time.Time) (int64, error) {
 	log.Printf("got latest block height: %d", latestBlockHeight)
 
 	// look across N blocks
-	nBlocks := 10
+	nBlocks := 100
 	lastBlockResult := latestBlockResult
 	var totalDurationDiff time.Duration
 	for i := latestBlockHeight - 1; i >= latestBlockHeight-int64(nBlocks); i-- {
@@ -182,6 +187,9 @@ func estimateUpgradeHeight(rpcUrl string, targetTime time.Time) (int64, error) {
 	remainingDuration := time.Until(targetTime)
 	neededBlocks := int64(remainingDuration) / int64(averageBlockDuration)
 	log.Printf("calculated we to wait %d more blocks. %s per block. %s until target time.\n", neededBlocks, averageBlockDuration.String(), remainingDuration.String())
+	if remainingDuration < 0 {
+		return 0, fmt.Errorf("remaining duration is negative: %s", remainingDuration.String())
+	}
 	return latestBlockHeight + neededBlocks, nil
 }
 
@@ -398,6 +406,31 @@ func validateAttestation(p validateAttestationParams) error {
 	return nil
 }
 
+func getUpgradeHandlerVersion(uc *upgradeConfig) (string, error) {
+	currentPlatform := fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
+	currentPlatformZetacoredUrl, ok := uc.Binaries[currentPlatform]
+	if !ok {
+		return "", fmt.Errorf("%s is not in the upgrade config", currentPlatform)
+	}
+	err := getter.Get(tmpZetacoredPath, currentPlatformZetacoredUrl, getter.WithMode(getter.ClientModeFile))
+	if err != nil {
+		return "", fmt.Errorf("downloading zetacored: %w", err)
+	}
+	err = os.Chmod(tmpZetacoredPath, 0o755)
+	if err != nil {
+		return "", fmt.Errorf("chmod zetacored: %w", err)
+	}
+
+	cmd := exec.Command(tmpZetacoredPath, "upgrade-handler-version")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("executing upgrade-handler-version: %w", err)
+	}
+	_ = os.Remove(tmpZetacoredPath)
+
+	return strings.TrimSpace(string(output)), nil
+}
+
 func release2Proposal(rawReleaseUrl string, upgradeHeight int64, skipAttestation bool, attestOrgOnly bool) (*Proposal, error) {
 	client := github.NewClient(nil)
 	// in case of private release
@@ -482,6 +515,13 @@ func release2Proposal(rawReleaseUrl string, upgradeHeight int64, skipAttestation
 		}
 	}
 
+	// download the binary to get upgrade handler version after attestations have been verified
+	// to avoid running an unrusted binary
+	upgradeHandlerVersion, err := getUpgradeHandlerVersion(uc)
+	if err != nil {
+		log.Printf("WARN: unable to set upgrade handler version: %v", err)
+	}
+
 	ucBytes, err := json.Marshal(uc)
 	if err != nil {
 		return nil, fmt.Errorf("marshal upgrade config: %w", err)
@@ -496,7 +536,7 @@ func release2Proposal(rawReleaseUrl string, upgradeHeight int64, skipAttestation
 				Plan: Plan{
 					Height: strconv.FormatInt(upgradeHeight, 10),
 					Info:   string(ucBytes),
-					Name:   tag,
+					Name:   upgradeHandlerVersion,
 				},
 				Authority: authority,
 			},
